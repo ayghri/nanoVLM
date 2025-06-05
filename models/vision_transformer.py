@@ -53,6 +53,7 @@ class ViTMultiHeadAttention(nn.Module):
         assert self.embd_dim % self.n_heads == 0, "embd_dim must be divisible by num_heads"
         self.head_dim = self.embd_dim // self.n_heads
         self.dropout = cfg.vit_dropout
+        self.use_kata = cfg.vit_attn_type == "kata"
 
         # Combined projections for all heads
         self.qkv_proj = nn.Linear(self.embd_dim, 3 * self.embd_dim, bias=True)
@@ -76,8 +77,26 @@ class ViTMultiHeadAttention(nn.Module):
         q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)  # (B, n_heads, T, head_dim)
         k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)  # (B, n_heads, T, head_dim)
         v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)  # (B, n_heads, T, head_dim)
+        if self.use_kata:
+            # (B, n_heads, T, 1)
+            q_norm = torch.linalg.norm(q, dim=-1, keepdim=True) 
+            # + 1e-8
+            # (B, n_heads, T, 1)
+            k_norm = torch.linalg.norm(k, dim=-1, keepdim=True) 
+            # + 1e-8
+            # (B, n_heads, T, T)
+            attn = (q @ k.transpose(-2, -1)) 
+            # * (1.0 / math.sqrt(k.size(-1)))
+            # lorentz
+            # future_score =  
+            attn = attn + q_norm * k_norm.transpose(-2, -1)
 
-        if self.sdpa:
+            # attn = F.softmax(attn, dim=-1)
+            attn = attn / attn.sum(-1, keepdim=True)
+            attn = self.attn_dropout(attn)
+            y = attn @ v  # (B, n_heads, T, T) x (B, n_heads, T, head_dim) -> (B, n_heads, T, head_dim)
+
+        elif self.sdpa:
             y = torch.nn.functional.scaled_dot_product_attention(
                 q, k, v, 
                 attn_mask=None,
